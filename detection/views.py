@@ -23,9 +23,45 @@ def get_client_ip(request):
     return request.META.get('REMOTE_ADDR')
 
 
+def is_likely_retina_fundus(image_bgr):
+    """
+    Heuristic check: does this image look like a retinal fundus image?
+    Returns (ok: bool, reason: str)
+    """
+    if image_bgr is None:
+        return False, "Invalid image file."
+
+    h, w = image_bgr.shape[:2]
+
+    # 1. Minimum resolution
+    if min(h, w) < 224:
+        return False, "Image resolution is too low for a fundus image."
+
+    # 2. Aspect ratio — fundus images are usually near-square
+    aspect_ratio = w / h
+    if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+        return False, "Image aspect ratio does not look like a retinal fundus image."
+
+    # 3. Color check — fundus images are colorful and typically reddish/orange
+    b, g, r = cv2.split(image_bgr)
+    mean_b = float(b.mean())
+    mean_g = float(g.mean())
+    mean_r = float(r.mean())
+
+    # Reject near-grayscale images
+    if abs(mean_r - mean_g) < 6 and abs(mean_g - mean_b) < 6:
+        return False, "Image appears grayscale; not a color fundus image."
+
+    # Reject if red channel is not dominant (fundus images are reddish)
+    if mean_r <= mean_b:
+        return False, "Image does not look like a retinal fundus image (expected reddish tone)."
+
+    return True, ""
+
+
 class PredictDRView(APIView):
-    authentication_classes = []          # login লাগবে না
-    permission_classes = [AllowAny]      # সবাই call করতে পারবে
+    authentication_classes = []
+    permission_classes = [AllowAny]
     throttle_classes = [TenSecondThrottle]
     parser_classes = [MultiPartParser, FormParser]
 
@@ -41,6 +77,12 @@ class PredictDRView(APIView):
 
         if image_bgr is None:
             return Response({"error": "Invalid image file"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # NEW: reject non-fundus images BEFORE running the model
+        ok, reason = is_likely_retina_fundus(image_bgr)
+        if not ok:
+            image_file.seek(0)
+            return Response({"error": reason}, status=status.HTTP_400_BAD_REQUEST)
 
         image_file.seek(0)
 
